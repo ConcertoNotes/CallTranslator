@@ -82,11 +82,36 @@ object VoskModels {
         if (File(target, ".ok").exists()) return target
 
         val zip = File(ctx.cacheDir, "$name.zip")
-        val conn = URL("https://alphacephei.com/vosk/models/$name.zip").openConnection() as HttpURLConnection
-        conn.connectTimeout = 20_000
+        // 先从自己的服务器下载，失败再回退到官方地址
+        val urls = listOfNotNull(
+            BuildConfig.MODEL_MIRROR.trim().trimEnd('/').takeIf { it.isNotEmpty() }?.let { "$it/$name.zip" },
+            "https://alphacephei.com/vosk/models/$name.zip",
+        )
+        var lastError: Exception? = null
+        for (url in urls) {
+            try {
+                download(url, zip, progress)
+                lastError = null
+                break
+            } catch (e: Exception) {
+                lastError = e
+                zip.delete()
+            }
+        }
+        lastError?.let { throw it }
+        target.deleteRecursively()
+        unzip(ctx, zip)
+        zip.delete()
+        File(target, ".ok").writeText("ok")
+        return target
+    }
+
+    private fun download(url: String, zip: File, progress: (Int) -> Unit) {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 15_000
         conn.readTimeout = 30_000
         try {
-            if (conn.responseCode != 200) throw RuntimeException("服务器返回 ${conn.responseCode}")
+            if (conn.responseCode != 200) throw RuntimeException("${conn.url.host} 返回 ${conn.responseCode}")
             val total = conn.contentLengthLong
             var done = 0L
             var lastPct = -1
@@ -108,13 +133,15 @@ object VoskModels {
                     }
                 }
             }
+            if (total > 0 && done != total) throw RuntimeException("下载不完整")
         } finally {
             conn.disconnect()
         }
+    }
 
-        // 压缩包里是 <模型名>/... 的结构，解压到 filesDir/vosk/ 下
+    /** 压缩包里是 <模型名>/... 的结构，解压到 filesDir/vosk/ 下 */
+    private fun unzip(ctx: Context, zip: File) {
         val root = File(ctx.filesDir, "vosk")
-        target.deleteRecursively()
         ZipInputStream(zip.inputStream().buffered()).use { zin ->
             while (true) {
                 val e = zin.nextEntry ?: break
@@ -128,9 +155,6 @@ object VoskModels {
                 }
             }
         }
-        zip.delete()
-        File(target, ".ok").writeText("ok")
-        return target
     }
 }
 

@@ -24,12 +24,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.common.model.DownloadConditions
+import android.text.InputType
+import android.widget.EditText
 import com.google.mlkit.nl.translate.TranslateLanguage
-import com.google.mlkit.nl.translate.Translation
-import com.google.mlkit.nl.translate.Translator
-import com.google.mlkit.nl.translate.TranslatorOptions
 import org.vosk.Model
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -111,14 +108,21 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
     private var utteranceId = 0
 
     // 翻译
-    private var toMine: Translator? = null
-    private var toTheirs: Translator? = null
-    private var liveSeq = 0 // 实时译文的编号，只显示最新一次的结果
+    private var translator: TextTranslator? = null
+    private var liveSeq = 0 // 每句话一个编号，旧句子的实时译文直接丢弃
+    private var liveBusy = false // 实时翻译同一时间只发一个请求
+    private var livePending: String? = null
+
+    // 服务器设置（在 App 里填写）
+    private val serverUrl get() = prefs.getString("serverUrl", "").orEmpty()
+    private val serverToken get() = prefs.getString("serverToken", "").orEmpty()
+    private val modelMirror get() = prefs.getString("modelMirror", "").orEmpty()
 
     // 准备状态：语言或引擎一变就重新准备，旧的回调按编号忽略
     private var prepGen = 0
     private var translateReady = false
     private var speechReady = false
+    private var translateFailed = false // 翻译准备失败时保留错误提示，不被其他进度覆盖
 
     private var listenOn = false
     private var mode = Mode.IDLE
@@ -167,6 +171,9 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
             }
         }
 
+        findViewById<View>(R.id.rowServer).setOnClickListener { showServerDialog() }
+        updateServerSummary()
+
         findViewById<View>(R.id.boxTheirs).setOnClickListener {
             pickLanguage("对方说的语言", theirsIdx) { theirsIdx = it; onLanguagesChanged() }
         }
@@ -209,8 +216,7 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
         worker.shutdownNow()
         voskModels.values.forEach { it.close() }
         tts?.shutdown()
-        toMine?.close()
-        toTheirs?.close()
+        translator?.close()
         super.onDestroy()
     }
 
@@ -242,6 +248,108 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
         prepare()
     }
 
+    // ---------- 服务器设置 ----------
+
+    private fun updateServerSummary() {
+        val host = serverUrl.removePrefix("http://").removePrefix("https://")
+        findViewById<TextView>(R.id.tvServerSummary).text = host.ifBlank { "未设置" }
+    }
+
+    private fun showServerDialog() {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+        }
+        fun field(label: String, value: String, hint: String, secret: Boolean = false): EditText {
+            box.addView(TextView(this).apply {
+                text = label
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setTextColor(color(R.color.secondary))
+                setPadding(0, dp(10), 0, 0)
+            })
+            return EditText(this).apply {
+                setText(value)
+                this.hint = hint
+                setSingleLine()
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                inputType = InputType.TYPE_CLASS_TEXT or
+                    if (secret) InputType.TYPE_TEXT_VARIATION_PASSWORD else InputType.TYPE_TEXT_VARIATION_URI
+                box.addView(this)
+            }
+        }
+        val etUrl = field("翻译服务器地址（MTranServer）", serverUrl, "如 http://1.2.3.4:8989，留空用离线翻译")
+        val etToken = field("令牌（MT_API_TOKEN）", serverToken, "服务器没设令牌就留空", secret = true)
+        val etMirror = field("识别模型下载地址", modelMirror, "如 http://1.2.3.4/vosk，留空用官方地址")
+        val tvResult = TextView(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setPadding(0, dp(12), 0, dp(4))
+        }
+        box.addView(tvResult)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("服务器设置")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("保存", null)
+            .setNeutralButton("测试连接", null)
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            // 测试连接：不关闭对话框
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                testServer(etUrl.text.toString(), etToken.text.toString(), etMirror.text.toString(), tvResult)
+            }
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                prefs.edit()
+                    .putString("serverUrl", normalizeUrl(etUrl.text.toString()))
+                    .putString("serverToken", etToken.text.toString().trim())
+                    .putString("modelMirror", normalizeUrl(etMirror.text.toString()))
+                    .apply()
+                dialog.dismiss()
+                updateServerSummary()
+                stopAll()
+                prepare()
+            }
+        }
+        dialog.show()
+    }
+
+    private fun testServer(url: String, token: String, mirror: String, out: TextView) {
+        val lines = mutableListOf<String>()
+        fun show() {
+            out.text = lines.joinToString("\n")
+        }
+        if (url.isBlank() && mirror.isBlank()) {
+            out.text = "两个地址都没填"
+            return
+        }
+        if (url.isNotBlank()) {
+            lines += "翻译服务器：测试中…"
+            show()
+            val idx = lines.lastIndex
+            val t = MTranTranslator(url, token)
+            t.translate("Hello, nice to meet you.", LANGS[1], LANGS[0]) { r ->
+                lines[idx] = r.fold(
+                    { "✅ 翻译服务器可用：Hello, nice to meet you. → $it" },
+                    { "❌ 翻译服务器：${it.message}" },
+                )
+                show()
+                t.close()
+            }
+        }
+        if (mirror.isNotBlank()) {
+            lines += "识别模型地址：测试中…"
+            show()
+            val idx = lines.lastIndex
+            worker.execute {
+                val msg = VoskModels.check(mirror)
+                handler.post {
+                    lines[idx] = msg
+                    show()
+                }
+            }
+        }
+    }
+
     // ---------- 准备：翻译模型 + 识别模型 ----------
 
     private fun kindFor(lang: Lang): Kind = when {
@@ -264,6 +372,7 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
         val gen = ++prepGen
         translateReady = false
         speechReady = false
+        translateFailed = false
         if (mine == theirs) {
             setStatus("两种语言不能相同", Level.ERROR)
             return
@@ -273,21 +382,28 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
     }
 
     private fun prepareTranslators(gen: Int) {
-        toMine?.close()
-        toTheirs?.close()
-        val a = Translation.getClient(
-            TranslatorOptions.Builder()
-                .setSourceLanguage(theirs.mlkit).setTargetLanguage(mine.mlkit).build()
-        )
-        val b = Translation.getClient(
-            TranslatorOptions.Builder()
-                .setSourceLanguage(mine.mlkit).setTargetLanguage(theirs.mlkit).build()
-        )
-        toMine = a
-        toTheirs = b
+        translator?.close()
+        if (serverUrl.isNotBlank()) {
+            // 用自己服务器翻译：先试翻一句，确认服务器能用
+            val t = MTranTranslator(serverUrl, serverToken)
+            translator = t
+            setStatus("正在连接翻译服务器…", Level.BUSY)
+            t.translate("Hello", LANGS[1], LANGS[0]) { r ->
+                if (gen != prepGen) return@translate
+                r.onSuccess {
+                    translateReady = true
+                    refreshReady()
+                }.onFailure { e ->
+                    translateFailed = true
+                    setStatus("翻译服务器连不上：${e.message}。请检查服务器设置", Level.ERROR)
+                }
+            }
+            return
+        }
+        val t = MlKitTranslator(mine, theirs)
+        translator = t
         setStatus("正在准备翻译模型（首次需联网下载）…", Level.BUSY)
-        val cond = DownloadConditions.Builder().build()
-        Tasks.whenAll(a.downloadModelIfNeeded(cond), b.downloadModelIfNeeded(cond))
+        t.download()
             .addOnSuccessListener {
                 if (gen != prepGen) return@addOnSuccessListener
                 translateReady = true
@@ -295,6 +411,7 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
             }
             .addOnFailureListener { e ->
                 if (gen != prepGen) return@addOnFailureListener
+                translateFailed = true
                 setStatus("翻译模型下载失败：${e.message}。检查网络后点一下语言重试", Level.ERROR)
             }
     }
@@ -312,10 +429,11 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
             return
         }
         val ctx = applicationContext
+        val mirror = modelMirror
         worker.execute {
             try {
                 for (lang in need) {
-                    val dir = VoskModels.install(ctx, lang) { pct ->
+                    val dir = VoskModels.install(ctx, lang, mirror) { pct ->
                         handler.post {
                             if (gen == prepGen) setStatus("正在下载${lang.label}识别模型（首次需要）… $pct%", Level.BUSY)
                         }
@@ -343,12 +461,17 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
     }
 
     private fun refreshReady() {
+        if (translateFailed) return
         if (translateReady && speechReady) {
-            setStatus("就绪 · ${engineName()}", Level.OK)
+            val tr = if (serverUrl.isNotBlank()) "服务器翻译" else "离线翻译"
+            setStatus("就绪 · ${engineName()} · $tr", Level.OK)
         } else if (translateReady) {
             // 识别模型还在下载，状态由下载进度负责显示
         } else if (speechReady) {
-            setStatus("正在准备翻译模型（首次需联网下载）…", Level.BUSY)
+            setStatus(
+                if (serverUrl.isNotBlank()) "正在连接翻译服务器…" else "正在准备翻译模型（首次需联网下载）…",
+                Level.BUSY,
+            )
         }
     }
 
@@ -476,16 +599,29 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
 
     /** 对方还没说完就先翻译已识别的半句，随说随翻。离线翻译很快，所以每次都直接翻。 */
     private fun translateLive(text: String) {
-        val tr = toMine ?: return
-        val seq = ++liveSeq
-        tr.translate(text).addOnSuccessListener { result ->
-            if (seq == liveSeq && mode == Mode.THEM) tvLiveTrans.text = result
+        val tr = translator ?: return
+        if (liveBusy) {
+            // 上一个请求还没回来，只记住最新的半句，回来后再翻
+            livePending = text
+            return
+        }
+        liveBusy = true
+        val seq = liveSeq
+        tr.translate(text, theirs, mine) { r ->
+            liveBusy = false
+            if (seq != liveSeq || mode != Mode.THEM) return@translate
+            r.onSuccess { tvLiveTrans.text = it }
+            livePending?.let {
+                livePending = null
+                translateLive(it)
+            }
         }
     }
 
     /** 清掉实时字幕；正在听的时候显示提示语 */
     private fun clearLive() {
         liveSeq++
+        livePending = null
         tvLiveTrans.text = ""
         when (mode) {
             Mode.THEM -> {
@@ -513,17 +649,17 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
             clearLive()
             updateButtons()
         }
-        val tr = toMine ?: return
-        tr.translate(text)
-            .addOnSuccessListener { result ->
+        val tr = translator ?: return
+        tr.translate(text, theirs, mine) { r ->
+            r.onSuccess { result ->
                 out.text = result
                 scrollToEnd()
                 if (readAloud && mode == Mode.TTS) speak(result, mine)
-            }
-            .addOnFailureListener { e ->
+            }.onFailure { e ->
                 out.text = "翻译失败：${e.message}"
                 if (readAloud && mode == Mode.TTS) backToListen()
             }
+        }
     }
 
     private fun handleMine(text: String) {
@@ -532,9 +668,9 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
         clearLive()
         updateButtons()
         val out = addBubble(text, fromMe = true)
-        val tr = toTheirs ?: return backToListen()
-        tr.translate(text)
-            .addOnSuccessListener { result ->
+        val tr = translator ?: return backToListen()
+        tr.translate(text, mine, theirs) { r ->
+            r.onSuccess { result ->
                 out.text = result
                 scrollToEnd()
                 // 点一下自己的气泡可以再播放一遍（对方没听清时用）
@@ -547,11 +683,11 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
                     }
                 }
                 if (mode == Mode.TTS) speak(result, theirs)
-            }
-            .addOnFailureListener { e ->
+            }.onFailure { e ->
                 out.text = "翻译失败：${e.message}"
                 backToListen()
             }
+        }
     }
 
     private fun speak(text: String, lang: Lang) {

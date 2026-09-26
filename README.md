@@ -7,7 +7,7 @@
 
 全部免费：
 - 语音识别：内置 Vosk 离线识别引擎，由 App 自己录音识别，不依赖 Google 或系统语音服务。每种语言首次使用时下载约 30–90MB 的模型。手机装了 Google 语音服务时，也可以在设置里改用 Google 识别。
-- 翻译：Google ML Kit 离线翻译，模型下载后可以断网使用
+- 翻译：可以用自己服务器上的 MTranServer，在 App 的「服务器设置」里填地址。不填则用 Google ML Kit 离线翻译，模型下载后可以断网使用。
 - 发音：手机自带的文字转语音
 
 ## 编译 APK（不用装任何开发工具）
@@ -16,6 +16,40 @@
 2. 打开仓库的 **Actions** 页面，等「Build APK」运行完成（约 5 分钟）。
 3. 点进这次运行，在页面底部 **Artifacts** 里下载 `噜噜传声-v版本号`，解压后得到 `噜噜传声-v版本号.apk`。
 4. 把 APK 发到安卓手机上安装，需要允许「安装未知来源应用」。从 v1.1 开始签名固定，以后更新直接覆盖安装。v1.0 需要先卸载一次。
+
+## 用自己的服务器（推荐，下载快）
+
+在服务器上部署两样东西，然后在 App 的 **服务器设置** 里填写地址，点「测试连接」确认可用后保存即可。
+
+**1. 翻译服务器 MTranServer**（`compose.yml`，然后运行 `docker compose up -d`）：
+
+```yaml
+services:
+  mtranserver:
+    image: xxnuo/mtranserver:latest
+    container_name: mtranserver
+    ports:
+      - "8989:8989"
+    environment:
+      - MT_API_TOKEN=换成你自己的随机密码
+    volumes:
+      - ./models:/app/models
+    restart: unless-stopped
+```
+
+App 里的「翻译服务器地址」填 `http://服务器IP:8989`，「令牌」填上面的 `MT_API_TOKEN`。
+
+注意：用服务器翻译时，通话过程中安卓手机必须能连上这台服务器。
+
+**2. 识别模型下载地址**：在服务器上运行 `bash scripts/mirror_models.sh /var/www/vosk` 下载全部模型，再用 nginx 提供下载：
+
+```nginx
+location /vosk/ {
+    alias /var/www/vosk/;
+}
+```
+
+App 里的「识别模型下载地址」填 `http://服务器IP/vosk`。
 
 ## 换 App 图标
 

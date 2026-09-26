@@ -76,7 +76,25 @@ object VoskModels {
     }
 
     /** 下载并解压模型，阻塞调用，必须在后台线程执行。progress 为 0–100 */
-    fun install(ctx: Context, lang: Lang, progress: (Int) -> Unit): File {
+    /** 检查镜像地址上有没有模型文件，返回给用户看的结果 */
+    fun check(mirror: String): String {
+        val url = "${normalizeUrl(mirror)}/${NAMES.getValue(TranslateLanguage.ENGLISH)}.zip"
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.requestMethod = "HEAD"
+            conn.connectTimeout = 5_000
+            conn.readTimeout = 5_000
+            val code = conn.responseCode
+            val size = conn.contentLengthLong
+            conn.disconnect()
+            if (code == 200) "✅ 识别模型地址可用（英语模型 ${size / 1024 / 1024}MB）"
+            else "❌ 识别模型地址返回 $code，检查文件是否放好：$url"
+        } catch (e: Exception) {
+            "❌ 识别模型地址连不上：${e.message}"
+        }
+    }
+
+    fun install(ctx: Context, lang: Lang, mirror: String, progress: (Int) -> Unit): File {
         val name = NAMES.getValue(lang.mlkit)
         val target = dir(ctx, name)
         if (File(target, ".ok").exists()) return target
@@ -84,7 +102,7 @@ object VoskModels {
         val zip = File(ctx.cacheDir, "$name.zip")
         // 先从自己的服务器下载，失败再回退到官方地址
         val urls = listOfNotNull(
-            BuildConfig.MODEL_MIRROR.trim().trimEnd('/').takeIf { it.isNotEmpty() }?.let { "$it/$name.zip" },
+            normalizeUrl(mirror).takeIf { it.isNotEmpty() }?.let { "$it/$name.zip" },
             "https://alphacephei.com/vosk/models/$name.zip",
         )
         var lastError: Exception? = null

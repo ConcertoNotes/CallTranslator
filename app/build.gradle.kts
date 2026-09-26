@@ -11,11 +11,8 @@ android {
         applicationId = "com.example.calltranslator"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
-        // 识别模型镜像地址（你自己的服务器），留空则只用官方地址。
-        // 例如 "https://example.com/vosk"，App 会下载 <地址>/<模型名>.zip
-        buildConfigField("String", "MODEL_MIRROR", "\"\"")
+        versionCode = 3
+        versionName = "1.2"
         ndk {
             // 只保留手机用的 CPU 架构，减小安装包
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
@@ -45,9 +42,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    buildFeatures {
-        buildConfig = true
     }
     kotlinOptions {
         jvmTarget = "17"

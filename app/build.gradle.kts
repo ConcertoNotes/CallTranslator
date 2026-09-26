@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.calltranslator"
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
         ndk {
             // 只保留手机用的 CPU 架构，减小安装包
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

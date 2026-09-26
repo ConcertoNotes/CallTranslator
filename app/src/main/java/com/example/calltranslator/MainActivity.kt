@@ -326,7 +326,9 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
             lines += "翻译服务器：测试中…"
             show()
             val idx = lines.lastIndex
-            val t = MTranTranslator(url, token)
+            val t = MTranTranslator(url, token, readTimeoutMs = 180_000)
+            lines[idx] = "翻译服务器：测试中…（首次可能要 1–2 分钟）"
+            show()
             t.translate("Hello, nice to meet you.", LANGS[1], LANGS[0]) { r ->
                 lines[idx] = r.fold(
                     { "✅ 翻译服务器可用：Hello, nice to meet you. → $it" },
@@ -384,20 +386,29 @@ class MainActivity : AppCompatActivity(), SpeechCallback {
     private fun prepareTranslators(gen: Int) {
         translator?.close()
         if (serverUrl.isNotBlank()) {
-            // 用自己服务器翻译：先试翻一句，确认服务器能用
-            val t = MTranTranslator(serverUrl, serverToken)
-            translator = t
-            setStatus("正在连接翻译服务器…", Level.BUSY)
-            t.translate("Hello", LANGS[1], LANGS[0]) { r ->
-                if (gen != prepGen) return@translate
-                r.onSuccess {
-                    translateReady = true
-                    refreshReady()
-                }.onFailure { e ->
-                    translateFailed = true
-                    setStatus("翻译服务器连不上：${e.message}。请检查服务器设置", Level.ERROR)
+            // 用自己服务器翻译。先把两个方向各翻一次：确认服务器能用，
+            // 也让服务器提前下载好这两个方向的模型（首次可能要 1–2 分钟）
+            translator = MTranTranslator(serverUrl, serverToken)
+            val warm = MTranTranslator(serverUrl, serverToken, readTimeoutMs = 180_000)
+            setStatus("正在连接翻译服务器（首次使用新语言时服务器要下载模型，可能要 1–2 分钟）…", Level.BUSY)
+            var left = 2
+            val onWarm: (Result<String>) -> Unit = { r ->
+                if (gen == prepGen && !translateFailed) {
+                    r.onSuccess {
+                        if (--left == 0) {
+                            translateReady = true
+                            refreshReady()
+                            warm.close()
+                        }
+                    }.onFailure { e ->
+                        translateFailed = true
+                        setStatus("翻译服务器：${e.message}", Level.ERROR)
+                        warm.close()
+                    }
                 }
             }
+            warm.translate(if (theirs == LANGS[0]) "你好" else "Hello", theirs, mine, onWarm)
+            warm.translate(if (mine == LANGS[0]) "你好" else "Hello", mine, theirs, onWarm)
             return
         }
         val t = MlKitTranslator(mine, theirs)

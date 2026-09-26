@@ -1,0 +1,15 @@
+<resources>
+    <!-- 参考 iOS 系统颜色（深色） -->
+    <color name="bg">#000000</color>
+    <color name="card">#1C1C1E</color>
+    <color name="label">#FFFFFF</color>
+    <color name="secondary">#8D8D93</color>
+    <color name="separator">#38383A</color>
+    <color name="accent">#0A84FF</color>
+    <color name="red">#FF453A</color>
+    <color name="green">#30D158</color>
+    <color name="orange">#FF9F0A</color>
+    <color name="fill">#2C2C2E</color>
+    <color name="bubble_them">#26252A</color>
+    <color name="bubble_me">#0A84FF</color>
+</resources>

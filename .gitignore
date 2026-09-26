@@ -3,3 +3,5 @@ build/
 local.properties
 *.iml
 .idea/
+# 由 scripts/make_icons.py 在编译时生成
+app/src/main/res/mipmap-*/
